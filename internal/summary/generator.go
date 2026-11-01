@@ -59,6 +59,7 @@ type SessionSummary struct {
 	Accomplishments []string                  `json:"accomplishments,omitempty"`
 	Changes         []string                  `json:"changes,omitempty"`
 	Files           []FileChange              `json:"files,omitempty"`
+	FilesOmitted    int                       `json:"files_omitted,omitempty"`
 	Pending         []string                  `json:"pending,omitempty"`
 	Errors          []string                  `json:"errors,omitempty"`
 	Decisions       []string                  `json:"decisions,omitempty"`
@@ -147,6 +148,11 @@ func SummarizeSession(ctx context.Context, opts Options) (*SessionSummary, error
 		ThreadSummaries: threadSummaries,
 	}
 
+	// A token limit on Text does not bound JSON metadata or the handoff, which
+	// repeats Files. Large untracked data trees otherwise get copied on every
+	// session termination. Agent-mentioned files come before Git enrichment.
+	summary.Files, summary.FilesOmitted = boundSummaryFiles(summary.Files)
+
 	// Optional LLM summarization for brief/detailed formats
 	if opts.Summarizer != nil && opts.Format != FormatHandoff {
 		prompt := buildLLMPrompt(opts.Format, summary)
@@ -179,6 +185,24 @@ func SummarizeSession(ctx context.Context, opts Options) (*SessionSummary, error
 	}
 
 	return summary, nil
+}
+
+// boundSummaryFiles bounds both entry count and serialized metadata. Keep whole
+// entries rather than truncating paths; omitted files remain in the Git tree.
+func boundSummaryFiles(files []FileChange) ([]FileChange, int) {
+	const maxFiles = 256
+	const maxBytes = 32 * 1024
+	kept := make([]FileChange, 0, min(len(files), maxFiles))
+	bytesUsed := 2 // JSON array brackets
+	for _, file := range files {
+		encoded, err := json.Marshal(file)
+		if err != nil || len(kept) >= maxFiles || bytesUsed+len(encoded)+1 > maxBytes {
+			continue
+		}
+		kept = append(kept, file)
+		bytesUsed += len(encoded) + 1
+	}
+	return kept, len(files) - len(kept)
 }
 
 // summaryData aggregates extracted data.
@@ -782,6 +806,9 @@ func formatBrief(summary *SessionSummary) string {
 	writeInlineList(&sb, "Accomplishments", summary.Accomplishments, 3)
 	writeInlineList(&sb, "Changes", summary.Changes, 3)
 	writeInlineFileList(&sb, summary.Files, 3)
+	if summary.FilesOmitted > 0 {
+		fmt.Fprintf(&sb, "Files omitted: %d additional changes; inspect the project Git state for the full list.\n", summary.FilesOmitted)
+	}
 	writeInlineList(&sb, "Pending", summary.Pending, 3)
 	writeInlineList(&sb, "Errors", summary.Errors, 2)
 
@@ -803,6 +830,9 @@ func formatDetailed(summary *SessionSummary) string {
 	writeSectionList(&sb, "Accomplishments", summary.Accomplishments)
 	writeSectionList(&sb, "Changes", summary.Changes)
 	writeSectionFiles(&sb, "Files", summary.Files)
+	if summary.FilesOmitted > 0 {
+		fmt.Fprintf(&sb, "Files omitted: %d additional changes; inspect the project Git state for the full list.\n\n", summary.FilesOmitted)
+	}
 	writeSectionList(&sb, "Pending", summary.Pending)
 	writeSectionList(&sb, "Errors", summary.Errors)
 	writeSectionList(&sb, "Decisions", summary.Decisions)
@@ -897,6 +927,9 @@ func buildHandoffSummary(summary *SessionSummary) *handoff.Handoff {
 		default:
 			h.MarkModified(fc.Path)
 		}
+	}
+	if summary.FilesOmitted > 0 {
+		h.Next = append(h.Next, fmt.Sprintf("Inspect project Git state for %d additional file changes omitted from this summary.", summary.FilesOmitted))
 	}
 
 	if len(summary.Errors) > 0 {

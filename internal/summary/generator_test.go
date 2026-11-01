@@ -2,6 +2,8 @@ package summary
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +27,61 @@ func TestSummarizeSessionMissingOutput(t *testing.T) {
 	_, err := SummarizeSession(context.Background(), Options{})
 	if err == nil {
 		t.Fatalf("expected error for missing outputs")
+	}
+}
+
+func TestSummarizeSessionBoundsFileMetadataAndHandoff(t *testing.T) {
+	files := make([]FileChange, 35430)
+	for i := range files {
+		files[i] = FileChange{Path: fmt.Sprintf("reports/client-data/%05d.json", i), Action: FileActionCreated}
+	}
+	input, err := json.Marshal(map[string]any{"changes": files})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, format := range []SummaryFormat{FormatBrief, FormatDetailed, FormatHandoff} {
+		t.Run(string(format), func(t *testing.T) {
+			s, err := SummarizeSession(context.Background(), Options{
+				Session: "large-data-tree", Format: format,
+				Outputs: []AgentOutput{{AgentID: "a1", Output: string(input)}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(s.Files) != 256 || s.FilesOmitted != len(files)-256 {
+				t.Fatalf("kept=%d omitted=%d", len(s.Files), s.FilesOmitted)
+			}
+			if s.Files[0] != files[0] || s.Files[255] != files[255] {
+				t.Fatal("file identities or ordering changed")
+			}
+			encoded, err := json.Marshal(s)
+			if err != nil || len(encoded) > 100*1024 {
+				t.Fatalf("summary metadata unbounded: bytes=%d err=%v", len(encoded), err)
+			}
+			if format == FormatHandoff && !strings.Contains(strings.Join(s.Handoff.Next, " "), "35174 additional file changes") {
+				t.Fatal("handoff does not disclose omitted metadata")
+			}
+		})
+	}
+}
+
+func TestBoundSummaryFilesPreservesSmallListsAndBoundsEncodedBytes(t *testing.T) {
+	for _, count := range []int{0, 1, 255, 256, 257} {
+		files := make([]FileChange, count)
+		for i := range files {
+			files[i] = FileChange{Path: fmt.Sprintf("file-%d", i), Action: FileActionModified}
+		}
+		kept, omitted := boundSummaryFiles(files)
+		if len(kept) != min(count, 256) || omitted != max(0, count-256) {
+			t.Fatalf("count=%d kept=%d omitted=%d", count, len(kept), omitted)
+		}
+	}
+	oversized := FileChange{Path: strings.Repeat("名\\\"", 20000), Action: FileActionCreated}
+	normal := FileChange{Path: "important.go", Action: FileActionModified}
+	kept, omitted := boundSummaryFiles([]FileChange{oversized, normal})
+	encoded, err := json.Marshal(kept)
+	if err != nil || len(encoded) > 32*1024 || len(kept) != 1 || kept[0] != normal || omitted != 1 {
+		t.Fatalf("byte bound/whole-entry preservation: kept=%d omitted=%d bytes=%d err=%v", len(kept), omitted, len(encoded), err)
 	}
 }
 
