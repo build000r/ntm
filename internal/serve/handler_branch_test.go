@@ -113,7 +113,10 @@ func reserveSharedBeadsProjectDir(t *testing.T) string {
 		t.Skip("skipping br-backed handler test in -short mode (bd-cnhpd)")
 	}
 	projectDir := t.TempDir()
-	srcRoot := filepath.Join("/data/projects/ntm", ".beads")
+	// Copy a small committed fixture (testdata/beads-project/.beads) so the
+	// tests run on any clean checkout. br builds beads.db from issues.jsonl on
+	// first use. The fixture holds bd-4b4zf and bd-bdseb, which tests name.
+	srcRoot := filepath.Join("testdata", "beads-project", ".beads")
 	dstRoot := filepath.Join(projectDir, ".beads")
 	if err := copyBeadsFixtureTree(srcRoot, dstRoot); err != nil {
 		t.Fatalf("copy beads fixture: %v", err)
